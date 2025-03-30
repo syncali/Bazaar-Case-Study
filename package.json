@@ -1,0 +1,28 @@
+{
+  "name": "bazaar-case-study",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://syncali: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@github.com/syncali/Bazaar-Case-Study.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/syncali/Bazaar-Case-Study/issues"
+  },
+  "homepage": "https://github.com/syncali/Bazaar-Case-Study#readme",
+  "dependencies": {
+    "express": "^4.21.2",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
