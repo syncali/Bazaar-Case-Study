@@ -9,6 +9,21 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
+const rateLimit = require("express-rate-limit");
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // Limit each IP to 100 requests per windowMs
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  message: "Too many requests from this IP, please try again after 15 minutes",
+});
+
+app.use(limiter);
+
+const basicAuthMiddleware = require("./middleware/basicAuth");
+app.use(basicAuthMiddleware);
+
 app.post("/products", async (req, res) => {
   const { name } = req.body;
   if (!name) {
@@ -179,10 +194,106 @@ app.get("/", (req, res) => {
       products: "/products",
       stores: "/stores",
       inventory: "/stores/:storeId/inventory",
-      stockMovements: "/stores/:storeId/stock-movements"
-    }
+      stockMovements: "/stores/:storeId/stock-movements",
+    },
   });
 });
+
+const { query, validationResult } = require("express-validator");
+
+app.get(
+  "/stock-movements",
+  [
+    query("limit")
+      .optional()
+      .isInt({ min: 1, max: 100 })
+      .toInt()
+      .withMessage("Limit must be an integer between 1 and 100"),
+    query("offset")
+      .optional()
+      .isInt({ min: 0 })
+      .toInt()
+      .withMessage("Offset must be a non-negative integer"),
+    query("storeId")
+      .optional()
+      .isInt()
+      .toInt()
+      .withMessage("storeId must be an integer"),
+    query("productId")
+      .optional()
+      .isInt()
+      .toInt()
+      .withMessage("productId must be an integer"),
+    query("startDate")
+      .optional()
+      .isISO8601()
+      .toDate()
+      .withMessage("startDate must be a valid ISO8601 date"),
+    query("endDate")
+      .optional()
+      .isISO8601()
+      .toDate()
+      .withMessage("endDate must be a valid ISO8601 date"),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const {
+      limit = 20,
+      offset = 0,
+      storeId,
+      productId,
+      startDate,
+      endDate,
+    } = req.query;
+
+    const whereClause = {};
+    const dateRangeClause = {};
+
+    if (storeId) {
+      whereClause.storeId = storeId;
+    }
+    if (productId) {
+      whereClause.productId = productId;
+    }
+    if (startDate) {
+      dateRangeClause[Op.gte] = startDate;
+    }
+    if (endDate) {
+      dateRangeClause[Op.lte] = endDate;
+    }
+    if (Object.keys(dateRangeClause).length > 0) {
+      whereClause.createdAt = dateRangeClause;
+    }
+
+    try {
+      const { count, rows } = await StockMovement.findAndCountAll({
+        where: whereClause,
+        include: [
+          { model: Product, attributes: ["id", "name"] },
+          { model: Store, attributes: ["id", "name"] },
+        ],
+        order: [["createdAt", "DESC"]],
+        limit: limit,
+        offset: offset,
+        distinct: true, // Important for count when using include
+      });
+
+      res.status(200).json({
+        totalItems: count,
+        totalPages: Math.ceil(count / limit),
+        currentPage: Math.floor(offset / limit) + 1,
+        movements: rows,
+      });
+    } catch (error) {
+      console.error("API Error (GET /stock-movements):", error);
+      res.status(500).json({ error: "Failed to retrieve stock movements." });
+    }
+  }
+);
 
 app.listen(port, async () => {
   console.log(`Server listening on port ${port}`);

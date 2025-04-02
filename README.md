@@ -107,3 +107,97 @@ PORT=3000
 
 ---
 
+### Stage 2 Enhancements (Implemented Day 3)
+
+* **Reporting Endpoint:** Added `GET /stock-movements` allowing filtering by `storeId`, `productId`, `startDate`, `endDate`, along with pagination (`limit`, `offset`). Provides visibility into stock movement history.
+* **Basic Authentication:** Implemented HTTP Basic Authentication as a global middleware to protect all API endpoints. Credentials are configurable via environment variables (`BASIC_AUTH_USER`, `BASIC_AUTH_PASS`). *Note: Basic Auth sends credentials in plain text (Base64 encoded) and is not suitable for production environments without HTTPS.*
+* **Rate Limiting:** Implemented global API rate limiting using `express-rate-limit` to prevent abuse and ensure service stability. Limits are configured per IP address over a time window.
+
+### API Endpoints (Stage 2)
+
+*All endpoints require Basic Authentication.*
+
+* **`POST /products`**: Add a new product (central catalog).
+    * Request Body: `{ "name": "string" }`
+    * Response (201): `{ "message": "...", "product": { ... } }`
+* **`GET /products`**: List all products.
+    * Response (200): `[ { "id": ..., "name": ..., "createdAt": ..., "updatedAt": ... } ]`
+* **`POST /stores`**: Add a new store.
+    * Request Body: `{ "name": "string", "location": "string" (optional) }`
+    * Response (201): `{ "message": "...", "store": { ... } }`
+* **`GET /stores`**: List all stores.
+    * Response (200): `[ { "id": ..., "name": ..., "location": ..., "createdAt": ..., "updatedAt": ... } ]`
+* **`POST /stores/:storeId/stock-movements`**: Record a stock movement for a specific store.
+    * URL Parameter: `storeId`
+    * Request Body: `{ "productId": integer, "type": "string ('in'|'out'|'manual')", "quantity": integer }`
+    * Response (201): `{ "message": "...", "movement": { ... } }`
+* **`GET /stores/:storeId/inventory`**: Get the current calculated inventory for all products in a specific store.
+    * URL Parameter: `storeId`
+    * Response (200): `{ "storeId": integer, "inventory": [ { "productId": integer, "productName": "string", "currentQuantity": integer } ] }`
+* **`GET /stock-movements`**: List and filter stock movements across stores/products.
+    * Query Parameters: `limit` (int, default 20), `offset` (int, default 0), `storeId` (int), `productId` (int), `startDate` (ISO8601), `endDate` (ISO8601).
+    * Response (200): `{ "totalItems": integer, "totalPages": integer, "currentPage": integer, "movements": [ { ...movement details with Product and Store info... } ] }`
+
+---
+
+## Stage 3: Large-Scale Distributed System (Design)
+
+### Introduction
+
+This stage outlines the architectural design considerations to scale the inventory system to support thousands of stores, handle high concurrency, achieve near real-time synchronization, and incorporate robust auditing. The focus here is on the *design principles* and *architectural patterns* rather than full implementation within the 5-day timeframe.
+
+### Horizontal Scalability
+
+* **Concept:** Run multiple instances of the stateless Node.js/Express application behind a load balancer (e.g., Nginx, AWS ELB). The load balancer distributes incoming API requests across the available instances.
+* **Statelessness:** API servers must be stateless. No user-specific session data or state should be stored in the memory of an individual instance. Authentication (currently Basic Auth) is inherently stateless per request. If more complex session management were needed, it would require external stores (like Redis or database sessions) or stateless tokens (like JWT).
+* **Database Scaling:** While the API scales horizontally, the database often requires separate scaling strategies (see Read/Write Separation). Effective connection pooling is essential at the application layer.
+
+### Asynchronous Processing (Event-Driven Architecture)
+
+* **Problem:** Handling complex operations (updating inventory, writing audit logs, notifying other systems) directly within an API request handler can lead to slow response times and tight coupling under high load.
+* **Solution:** Introduce a message queue (e.g., RabbitMQ, Kafka, AWS SQS) to decouple tasks.
+* **Proposed Flow:**
+    1.  API receives write requests (e.g., stock movement).
+    2.  API performs initial validation and publishes an event (e.g., `StockMovementReceived`) to the queue with necessary data.
+    3.  API responds quickly to the client (e.g., 202 Accepted).
+    4.  Independent worker services consume events from the queue.
+    5.  Workers perform the database operations (inserting movement, updating aggregates if any, logging audits) within a transaction.
+* **Benefits:** Improved API responsiveness, increased resilience (failed operations can be retried from the queue), better scalability (workers can scale independently), service decoupling.
+* **Trade-offs:** Introduces eventual consistency (data updates are not instantaneous after the API call), adds operational complexity (managing the queue and workers).
+
+### Caching
+
+* **Problem:** Frequent database reads for data that changes infrequently (product details, store info) or complex calculations (inventory summaries) can increase load and latency.
+* **Solution:** Implement a distributed caching layer using systems like Redis or Memcached.
+* **Caching Candidates & Strategy:**
+    * **Product/Store Details:** Cache frequently accessed product or store data keyed by their IDs. Use a Cache-Aside strategy with appropriate TTL and explicit invalidation on updates.
+    * **Inventory Counts:** Caching calculated inventory (`/stores/:storeId/inventory`) is challenging due to frequent changes. It might be more practical to cache components (like product names) or accept slightly stale data with a short TTL if business requirements allow. Alternatively, focus on optimizing the database query itself.
+* **Invalidation:** Crucial for data consistency. Use TTLs, and implement explicit cache clearing logic within the services that update the underlying data (e.g., after a product name change or successful stock movement processing by a worker).
+
+### Database Read/Write Separation
+
+* **Problem:** High read volume (e.g., from reporting, inventory checks) can contend with write operations on the primary database, impacting performance.
+* **Solution:** Utilize PostgreSQL's streaming replication feature to create one or more read-only replicas of the primary database.
+* **Implementation Concept:** Configure the application (potentially via Sequelize or connection logic) to direct all write operations (`INSERT`, `UPDATE`, `DELETE`) to the primary database instance and route read-heavy queries (`SELECT` operations from reporting, listing endpoints) to the read replicas.
+* **Considerations:** Managing connections to different database roles (primary vs. replica), potential for replication lag (reads from replicas might be slightly behind the primary), increased infrastructure complexity.
+
+### Audit Logging (Design)
+
+* **Purpose:** Maintain an immutable record of significant actions and data changes within the system for security analysis, compliance, debugging, and accountability.
+* **Proposed Schema (`AuditLogs` Table):**
+    * `id`: BIGSERIAL or UUID (Primary Key)
+    * `timestamp`: TIMESTAMP WITH TIME ZONE (Indexed)
+    * `userId`: TEXT or INTEGER (Identifier of the actor, null if system) (Indexed)
+    * `actionType`: TEXT (e.g., 'PRODUCT_CREATE', 'STOCK_IN', 'STORE_UPDATE') (Indexed)
+    * `entityType`: TEXT (e.g., 'Product', 'Store', 'StockMovement') (Indexed)
+    * `entityId`: TEXT or INTEGER (ID of the affected entity) (Indexed)
+    * `details`: JSONB (Stores contextual info, old/new values, IP address, etc.)
+* **Implementation Strategy:** Integrate audit log creation into the application logic, ideally within the worker services processing asynchronous events. The audit record creation should be part of the same database transaction as the data change itself to ensure atomicity. This provides flexibility to include rich application context in the `details` field.
+
+### Concurrency and Transactions
+
+* **Importance:** Ensure data integrity under concurrent operations, especially as the system scales.
+* **Transactions:** All operations involving multiple related database writes (e.g., creating a movement and potentially updating an aggregate inventory table, plus writing an audit log) *must* be wrapped in a database transaction (`sequelize.transaction(...)`) to guarantee atomicity.
+* **Locking:** While the current movement-logging approach minimizes direct read-modify-write conflicts on a single quantity field, be mindful of potential race conditions in more complex future scenarios. Employ database-level locking (pessimistic or optimistic) if needed to serialize access to critical resources during transactions.
+
+---
