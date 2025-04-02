@@ -1,177 +1,195 @@
-// server.js
-const express = require('express');
-const sqlite3 = require('sqlite3').verbose(); // Use verbose for more detailed logs
+"use strict";
+require("dotenv").config();
+const express = require("express");
+const { sequelize, Product, Store, StockMovement } = require("./models");
+const { Op, fn, col, literal } = require("sequelize");
+
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json());
 
-// --- Database Setup ---
-const DB_SOURCE = "inventory.db"; // Database file name
-
-// Connect to (or create) the SQLite database file
-const db = new sqlite3.Database(DB_SOURCE, (err) => {
-  if (err) {
-    // Cannot open database
-    console.error(err.message);
-    throw err;
-  } else {
-    console.log('Connected to the SQLite database.');
-    // Use serialize to ensure table creation happens sequentially
-    db.serialize(() => {
-      // Create Products table if it doesn't exist
-      db.run(`CREATE TABLE IF NOT EXISTS Products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE
-      )`, (err) => {
-        if (err) {
-          console.error("Error creating Products table:", err.message);
-        } else {
-          console.log("Products table ready.");
-        }
-      });
-
-      // Create StockMovements table if it doesn't exist
-      db.run(`CREATE TABLE IF NOT EXISTS StockMovements (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        productId INTEGER NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('in', 'out', 'manual')),
-        quantity INTEGER NOT NULL CHECK(quantity > 0),
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (productId) REFERENCES Products(id)
-      )`, (err) => {
-        if (err) {
-          console.error("Error creating StockMovements table:", err.message);
-        } else {
-          console.log("StockMovements table ready.");
-        }
-      });
-    });
+app.post("/products", async (req, res) => {
+  const { name } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: "Product name is required." });
+  }
+  try {
+    const product = await Product.create({ name });
+    res.status(201).json({ message: "Product added successfully", product });
+  } catch (error) {
+    if (error.name === "SequelizeUniqueConstraintError") {
+      return res.status(409).json({ error: "Product name already exists." });
+    }
+    console.error("API Error (POST /products):", error);
+    res.status(500).json({ error: "Failed to add product." });
   }
 });
 
-// Simple route for testing
-app.get('/', (req, res) => {
-  res.send('Inventory Backend API is running!');
+app.get("/products", async (req, res) => {
+  try {
+    const products = await Product.findAll({ order: [["name", "ASC"]] });
+    res.status(200).json(products);
+  } catch (error) {
+    console.error("API Error (GET /products):", error);
+    res.status(500).json({ error: "Failed to retrieve products." });
+  }
 });
 
-// --- API Endpoints will go here ---
-
-// POST /products - Add a new product
-app.post('/products', (req, res) => {
-    const { name } = req.body;
-  
-    if (!name) {
-      return res.status(400).json({ error: 'Product name is required.' });
+app.post("/stores", async (req, res) => {
+  const { name, location } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: "Store name is required." });
+  }
+  try {
+    const store = await Store.create({ name, location });
+    res.status(201).json({ message: "Store added successfully", store });
+  } catch (error) {
+    if (error.name === "SequelizeUniqueConstraintError") {
+      return res.status(409).json({ error: "Store name already exists." });
     }
-  
-    const sql = `INSERT INTO Products (name) VALUES (?)`;
-    db.run(sql, [name], function(err) { // Use function() to access this.lastID
-      if (err) {
-        // UNIQUE constraint error likely means product already exists
-        if (err.message.includes('UNIQUE constraint failed')) {
-           return res.status(409).json({ error: 'Product name already exists.' });
-        }
-        console.error("DB Error (POST /products):", err.message);
-        return res.status(500).json({ error: 'Database error occurred.' });
-      }
-      res.status(201).json({
-        message: 'Product added successfully',
-        productId: this.lastID // Get the ID of the newly inserted row
-      });
+    console.error("API Error (POST /stores):", error);
+    res.status(500).json({ error: "Failed to add store." });
+  }
+});
+
+app.get("/stores", async (req, res) => {
+  try {
+    const stores = await Store.findAll({ order: [["name", "ASC"]] });
+    res.status(200).json(stores);
+  } catch (error) {
+    console.error("API Error (GET /stores):", error);
+    res.status(500).json({ error: "Failed to retrieve stores." });
+  }
+});
+
+app.post("/stores/:storeId/stock-movements", async (req, res) => {
+  const { storeId } = req.params;
+  const { productId, type, quantity } = req.body;
+  const validTypes = ["in", "out", "manual"];
+
+  if (!productId || !type || !quantity) {
+    return res
+      .status(400)
+      .json({ error: "productId, type, and quantity are required." });
+  }
+  if (!validTypes.includes(type)) {
+    return res.status(400).json({
+      error: `Invalid type. Must be one of: ${validTypes.join(", ")}`,
     });
-  });
+  }
+  if (typeof quantity !== "number" || quantity <= 0) {
+    return res
+      .status(400)
+      .json({ error: "Quantity must be a positive number." });
+  }
 
-  // POST /stock-movements - Record a stock movement
-app.post('/stock-movements', (req, res) => {
-    const { productId, type, quantity } = req.body;
-    const validTypes = ['in', 'out', 'manual'];
-  
-    // Basic Validation
-    if (!productId || !type || !quantity) {
-      return res.status(400).json({ error: 'productId, type, and quantity are required.' });
+  try {
+    const store = await Store.findByPk(storeId);
+    if (!store) {
+      return res
+        .status(404)
+        .json({ error: `Store with ID ${storeId} not found.` });
     }
-    if (!validTypes.includes(type)) {
-      return res.status(400).json({ error: `Invalid type. Must be one of: ${validTypes.join(', ')}` });
+    const product = await Product.findByPk(productId);
+    if (!product) {
+      return res
+        .status(404)
+        .json({ error: `Product with ID ${productId} not found.` });
     }
-    if (typeof quantity !== 'number' || quantity <= 0) {
-        return res.status(400).json({ error: 'Quantity must be a positive number.' });
-    }
-  
-    // Optional: Check if productId exists before inserting movement (more robust)
-    const checkProductSql = `SELECT id FROM Products WHERE id = ?`;
-    db.get(checkProductSql, [productId], (err, row) => {
-        if (err) {
-            console.error("DB Error (Check Product):", err.message);
-            return res.status(500).json({ error: 'Database error occurred.' });
-        }
-        if (!row) {
-            return res.status(404).json({ error: `Product with ID ${productId} not found.` });
-        }
-  
-        // Product exists, proceed with inserting movement
-        const insertMovementSql = `INSERT INTO StockMovements (productId, type, quantity) VALUES (?, ?, ?)`;
-        db.run(insertMovementSql, [productId, type, quantity], function(err) {
-          if (err) {
-            console.error("DB Error (POST /stock-movements):", err.message);
-            return res.status(500).json({ error: 'Database error occurred.' });
-          }
-          res.status(201).json({
-            message: 'Stock movement recorded successfully',
-            movementId: this.lastID
-          });
-        });
+
+    const movement = await StockMovement.create({
+      storeId: parseInt(storeId, 10),
+      productId: parseInt(productId, 10),
+      type,
+      quantity,
     });
-  });
+    res
+      .status(201)
+      .json({ message: "Stock movement recorded successfully", movement });
+  } catch (error) {
+    if (error.name === "SequelizeValidationError") {
+      return res
+        .status(400)
+        .json({ error: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("API Error (POST /stores/:storeId/stock-movements):", error);
+    res.status(500).json({ error: "Failed to record stock movement." });
+  }
+});
 
-  // GET /products/:productId/quantity - Get current stock quantity for a product
-app.get('/products/:productId/quantity', (req, res) => {
-    const { productId } = req.params;
-  
-    // Calculate quantity: SUM(quantity) where type='in' MINUS SUM(quantity) where type IN ('out', 'manual')
-    const sql = `
-      SELECT
-        COALESCE(SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END), 0) -
-        COALESCE(SUM(CASE WHEN type IN ('out', 'manual') THEN quantity ELSE 0 END), 0)
-        AS currentQuantity
-      FROM StockMovements
-      WHERE productId = ?
-    `;
-  
-    db.get(sql, [productId], (err, row) => {
-      if (err) {
-        console.error("DB Error (GET /products/:id/quantity):", err.message);
-        return res.status(500).json({ error: 'Database error occurred.' });
-      }
-      // Note: This query returns a quantity even if the product ID doesn't exist in StockMovements (it will be 0).
-      // You might want to add a check first if the product exists in the Products table if strictness is needed.
-       if (row === undefined) {
-           // This case is less likely with the COALESCE, but good practice
-           return res.status(404).json({ error: `Product or movements not found for ID ${productId}` });
-       }
-  
-      res.status(200).json({
-        productId: parseInt(productId, 10), // Convert param string to number
-        currentQuantity: row.currentQuantity
-      });
+app.get("/stores/:storeId/inventory", async (req, res) => {
+  const { storeId } = req.params;
+
+  try {
+    const store = await Store.findByPk(storeId);
+    if (!store) {
+      return res
+        .status(404)
+        .json({ error: `Store with ID ${storeId} not found.` });
+    }
+
+    const inventory = await StockMovement.findAll({
+      attributes: [
+        "productId",
+        [
+          fn("SUM", literal(`CASE WHEN type = 'in' THEN quantity ELSE 0 END`)),
+          "totalIn",
+        ],
+        [
+          fn(
+            "SUM",
+            literal(
+              `CASE WHEN type IN ('out', 'manual') THEN quantity ELSE 0 END`
+            )
+          ),
+          "totalOut",
+        ],
+      ],
+      where: { storeId: storeId },
+      group: ["productId", "Product.id"],
+      include: [{ model: Product, attributes: ["name"] }],
     });
-  });
 
-  
-// Start the server
-app.listen(port, () => {
+    const formattedInventory = inventory
+      .map((item) => {
+        const totalIn = parseInt(item.getDataValue("totalIn"), 10);
+        const totalOut = parseInt(item.getDataValue("totalOut"), 10);
+        return {
+          productId: item.productId,
+          productName: item.Product ? item.Product.name : "N/A",
+          currentQuantity: totalIn - totalOut,
+        };
+      })
+      .filter((item) => item.currentQuantity !== 0);
+
+    res
+      .status(200)
+      .json({ storeId: parseInt(storeId, 10), inventory: formattedInventory });
+  } catch (error) {
+    console.error("API Error (GET /stores/:storeId/inventory):", error);
+    res.status(500).json({ error: "Failed to retrieve store inventory." });
+  }
+});
+
+app.get("/", (req, res) => {
+  res.status(200).json({
+    message: "Welcome to Bazaar API",
+    endpoints: {
+      products: "/products",
+      stores: "/stores",
+      inventory: "/stores/:storeId/inventory",
+      stockMovements: "/stores/:storeId/stock-movements"
+    }
+  });
+});
+
+app.listen(port, async () => {
   console.log(`Server listening on port ${port}`);
-  // Database initialization messages will appear before this if successful
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    db.close((err) => {
-        if (err) {
-            return console.error(err.message);
-        }
-        console.log('Closed the database connection.');
-        process.exit(0);
-    });
+  try {
+    await sequelize.authenticate();
+    console.log("Database connection established successfully.");
+  } catch (error) {
+    console.error("Unable to connect to the database:", error);
+  }
 });

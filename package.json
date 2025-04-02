@@ -19,7 +19,11 @@
   },
   "homepage": "https://github.com/syncali/Bazaar-Case-Study#readme",
   "dependencies": {
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "pg": "^8.14.1",
+    "sequelize": "^6.37.7",
+    "sequelize-cli": "^6.6.2",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
