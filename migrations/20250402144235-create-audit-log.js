@@ -1,5 +1,4 @@
 'use strict';
-/** @type {import('sequelize-cli').Migration} */
 module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.createTable('AuditLogs', {
@@ -7,35 +6,41 @@ module.exports = {
         allowNull: false,
         autoIncrement: true,
         primaryKey: true,
-        type: Sequelize.INTEGER
+        type: Sequelize.INTEGER 
       },
       userId: {
-        type: Sequelize.STRING
+        type: Sequelize.STRING,
+        allowNull: true
       },
       actionType: {
-        type: Sequelize.STRING
+        type: Sequelize.STRING,
+        allowNull: false
       },
       entityType: {
-        type: Sequelize.STRING
+        type: Sequelize.STRING,
+        allowNull: false
       },
       entityId: {
-        type: Sequelize.STRING
+        type: Sequelize.STRING,
+        allowNull: true
       },
       details: {
-        type: Sequelize.JSONB
-      },
-      timestamp: {
-        type: Sequelize.DATE
+        type: Sequelize.JSONB, 
+        allowNull: true
       },
       createdAt: {
         allowNull: false,
-        type: Sequelize.DATE
-      },
-      updatedAt: {
-        allowNull: false,
-        type: Sequelize.DATE
+        type: Sequelize.DATE,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') 
       }
+      
     });
+    
+    await queryInterface.addIndex('AuditLogs', ['userId']);
+    await queryInterface.addIndex('AuditLogs', ['actionType']);
+    await queryInterface.addIndex('AuditLogs', ['entityType', 'entityId']);
+    await queryInterface.addIndex('AuditLogs', ['createdAt']);
+
   },
   async down(queryInterface, Sequelize) {
     await queryInterface.dropTable('AuditLogs');
